@@ -3352,11 +3352,22 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_mutation_in_read_only_mode():
             return
         parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
         if parsed.path.startswith('/api/local/cron/jobs/'):
             if not _is_authorized(self):
                 self._unauthorized()
                 return
             self._cron_delete(parsed)
+            return
+        if parsed.path == '/api/local/room/vault':
+            if not _is_authorized(self):
+                self._unauthorized()
+                return
+            room_id = ((params.get('room_id') or [''])[0]).strip()
+            if not room_id:
+                self._json(400, {'error': 'bad_request', 'detail': 'Missing room_id.'})
+                return
+            self._json(200, {'success': True, 'removed': clear_room_vault(room_id)})
             return
         if parsed.path == '/api/local/push/subscriptions':
             if not _is_authorized(self):

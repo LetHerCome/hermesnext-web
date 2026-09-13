@@ -2692,6 +2692,22 @@ export async function loadRoomVault(roomId: string, accessToken?: string): Promi
   return (await response.json()) as { room_id: string; vault: string };
 }
 
+export async function clearRoomVault(roomId: string, accessToken?: string): Promise<boolean> {
+  const params = new URLSearchParams({ room_id: roomId });
+  const response = await fetch(localApiUrl(`/room/vault?${params.toString()}`), {
+    method: 'DELETE',
+    headers: buildHeaders(accessToken),
+  });
+  if (response.status === 401) throw new MissionControlAuthError();
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const detail = payload?.detail || payload?.error || '';
+    throw new Error(`Room vault clear failed (${response.status})${detail ? `: ${detail}` : ''}`);
+  }
+  const data = (await response.json()) as { removed?: boolean };
+  return data.removed === true;
+}
+
 // ---------- Session synthesis candidates (BDH pre-write gate) ----------
 
 export interface MissionControlSessionSynthesisSafeProvenance {
