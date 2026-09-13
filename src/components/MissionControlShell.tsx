@@ -22,7 +22,7 @@ import { useI18n } from '../lib/i18n';
 import { ChatDrawer } from './ChatDrawer';
 import { useChatPresence } from '../lib/chat-presence';
 import { useLastRoutePersistence } from '../lib/last-route';
-import { readLocalLastRoom, writeLocalLastRoom, syncLastRoomToServer, fetchServerLastRoom } from '../lib/room-persistence';
+import { readLocalLastRoom, writeLocalLastRoom, claimLastRoomPointer, fetchServerLastRoom } from '../lib/room-persistence';
 import { recordReloadDiagnostic } from '../lib/reload-diagnostics';
 import { Button } from './ui/Button';
 import { PluginRegistry } from '../core/plugins/registry';
@@ -129,7 +129,7 @@ export function MissionControlShell({ registry, navItems: runtimeNavItems = [] }
       // device selects a room last wins for every device.
       writeLocalLastRoom(roomId);
       const previous = serverLastRoomRef.current;
-      void syncLastRoomToServer(roomId, roomName ?? null, storedToken || '', previous?.roomId === roomId ? previous.revision : null)
+      void claimLastRoomPointer(roomId, roomName ?? null, storedToken || '', previous?.roomId === roomId ? previous.revision : null)
         .then((result) => {
           if (result.lastRoom) serverLastRoomRef.current = { roomId: result.lastRoom.roomId, revision: result.lastRoom.revision };
         })

@@ -91,6 +91,41 @@ export async function syncLastRoomToServer(
   }
 }
 
+/**
+ * How many times a claim may be re-issued after a 409 before giving up. The
+ * retry is what makes "last writer wins" actually work: the store rejects a
+ * missing/stale revision on purpose, so the first attempt of every room switch
+ * is expected to conflict once a pointer already exists.
+ */
+const MAX_CLAIM_ATTEMPTS = 3;
+
+/**
+ * Claim the shared room pointer with a bounded conflict retry.
+ *
+ * `syncLastRoomToServer` alone cannot move the pointer: the store refuses a
+ * claim whose `expectedRevision` does not match the canonical revision, and the
+ * caller legitimately sends `null` whenever it switches to a room other than
+ * the one it last saw. Without the retry the pointer is frozen at the first
+ * room ever selected and every device keeps adopting it. On 409 the canonical
+ * revision is adopted and the claim is re-issued, exactly like the last-chat
+ * pointer does.
+ */
+export async function claimLastRoomPointer(
+  roomId: string,
+  roomName: string | null,
+  storedToken: string,
+  expectedRevision: number | null,
+): Promise<LastRoomClaimResult> {
+  let expected = expectedRevision;
+  let result = await syncLastRoomToServer(roomId, roomName, storedToken, expected);
+  for (let attempt = 1; attempt < MAX_CLAIM_ATTEMPTS && !result.accepted; attempt += 1) {
+    if (!result.conflict || !result.lastRoom) break;
+    expected = result.lastRoom.revision;
+    result = await syncLastRoomToServer(roomId, roomName, storedToken, expected);
+  }
+  return result;
+}
+
 export async function fetchServerLastRoom(storedToken: string, signal?: AbortSignal): Promise<ServerLastRoom | null> {
   try {
     const res = await fetch('/api/local/room/last', {
