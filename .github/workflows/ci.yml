@@ -28,11 +28,12 @@ jobs:
           version: 10.33.2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test:vite-config
+      - run: pnpm test:rooms
       - run: pnpm test:mobile-route-layout
       - run: pnpm test:system-health-ui
 

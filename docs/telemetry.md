@@ -180,6 +180,9 @@ The telemetry server exposes a set of read-only `/api/local/*` endpoints. Repres
 - `/api/local/cron/jobs`, `/api/local/config`, `/api/local/tools`, `/api/local/skills`
 - `/api/local/logs`
 - `/api/local/chat/last`, `/api/local/chat/whiteboard` — chat + tldraw bridge
+- `/api/local/room/last` — cross-device **last-room pointer** (GET; POST claims it with a `expectedRevision` CAS and answers 409 on conflict)
+- `/api/local/room/vault` — room → nightly-synthesis vault routing map (GET by `room_id` or the whole map; POST to set; DELETE by `room_id` to clear)
+- `/api/local/room/tools` — per-turn tool/reasoning traces for a room, collected read-only from the member profiles' `Group: <room_id>` sessions (`?room_id=...&max_age=<1-60>`)
 - `/api/local/knowledge`, `/api/local/knowledge/file` — vault knowledge (see below)
 
 The frontend consumes these through `src/lib/hermes-api.ts` (`loadProviderUsage`, etc.) and `src/lib/mission-control-store.tsx`.

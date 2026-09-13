@@ -9,6 +9,9 @@ import {
   type GroupRoom,
   type GroupState,
 } from './group-gateway';
+import { clearRoomVault } from './hermes-api';
+import { isRoomNotFound, pickFallbackRoom } from './room-recovery';
+
 
 export type RoundCoordinates = { round: number; coordinates: Array<{ x: number; y: number }> };
 export type GroupRoomError = { message: string; retryable: boolean };
@@ -17,6 +20,8 @@ export type GroupRoomOptions = {
   pollMs?: number;
   initialRoomId?: string | null;
   enabled?: boolean;
+  /** MC access token, used by the MC-owned side effects (room→vault registry). */
+  accessToken?: string;
 };
 export type GroupRoomResult = {
   capabilities: GroupCapabilities | null;
@@ -35,6 +40,7 @@ export type GroupRoomResult = {
   pendingActions: unknown[];
   approval: unknown;
   blocked: boolean;
+  working: boolean;
   disbanded: boolean;
   memberActivity: Record<string, GroupEvent>;
   round: RoundCoordinates;
@@ -44,6 +50,10 @@ export type GroupRoomResult = {
   retry: () => Promise<void>;
   send: (text: string, threadId?: string) => Promise<GroupEvent | null>;
   disband: () => Promise<void>;
+  approve: (params: { memberId?: string | null; taskId?: string | null; executionGeneration?: number; choice?: string | null; requestId?: string | null }) => Promise<unknown>;
+  retryMember: (taskId?: string | null) => Promise<unknown>;
+  renameRoom: (name: string) => Promise<void>;
+  stopRoom: () => Promise<number | null>;
   clearAuthorityChange: () => void;
 };
 
@@ -96,6 +106,11 @@ export function toGroupRoomError(cause: unknown): GroupRoomError {
   return { message, retryable: true };
 }
 
+/** A room the gateway no longer knows about (disbanded, pruned, or left behind
+ *  by a store move). Re-exported so callers keep one import site; the logic
+ *  lives in `room-recovery` because it is pure and directly testable. */
+export { isRoomNotFound, pickFallbackRoom } from './room-recovery';
+
 function statusParts(status: Record<string, unknown>) {
   const pending = Array.isArray(status.pending_actions) ? status.pending_actions : [];
   const approval = status.approval ?? status.pending_approval ?? null;
@@ -141,8 +156,40 @@ export function useGroupRoom(options: GroupRoomOptions = {}): GroupRoomResult {
     setRoom((current) => current ? { ...current, latestSeq: Math.max(current.latestSeq, page.latestSeq) } : current);
   }, []);
 
+  // The gateway reports has_more as cursor < latest_seq where latest_seq is the
+  // room's GLOBAL next_seq (it keeps advancing while members write). On a busy
+  // room that never converges, so cap the catch-up pagination: first page renders
+  // immediately, the poll (5s) keeps syncing the tail. Without the cap the room
+  // stayed in "Loading room…" forever even though the transcript was already
+  // populated (this room: 122 events, first page clipped at 100 by bytes).
+  const MAX_LOG_PAGES = 8;
+
   const loadRoom = useCallback(async (roomId: string, reset = false) => {
-    const state: GroupState = await clientRef.current.state(roomId);
+    let state: GroupState;
+    try {
+      state = await clientRef.current.state(roomId);
+    } catch (cause) {
+      // The room we were pointed at no longer exists (disbanded and pruned, or
+      // left behind by a store move on the gateway side). Fall back to a room
+      // that does exist instead of leaving the drawer pinned to a dead id --
+      // the poll retries every few seconds, so without this the rejection is
+      // unhandled forever and the UI never recovers on its own.
+      if (!isRoomNotFound(cause)) throw cause;
+      const fallback = pickFallbackRoom((await clientRef.current.list()).rooms, roomId);
+      if (!mountedRef.current) return;
+      if (!fallback) {
+        setSelectedRoomId(null);
+        setRoom(null);
+        setEvents([]);
+        setCursor(null);
+        setDriverStatus({});
+        setError(toGroupRoomError(cause));
+        return;
+      }
+      setSelectedRoomId(fallback.id);
+      await loadRoom(fallback.id, true);
+      return;
+    }
     if (!mountedRef.current) return;
     setRoom(state.room);
     setDriverStatus(state.driverStatus ?? {});
@@ -153,11 +200,24 @@ export function useGroupRoom(options: GroupRoomOptions = {}): GroupRoomResult {
     }
     let page = await clientRef.current.log(roomId, reset ? { sinceSeq: 0 } : { ...(cursor === null ? { sinceSeq: state.room.latestSeq } : { cursor }) });
     applyLog(page);
-    while (page.hasMore && page.cursor !== null) {
+    let pageCount = 1;
+    while (page.hasMore && page.cursor !== null && pageCount < MAX_LOG_PAGES) {
       page = await clientRef.current.log(roomId, { cursor: page.cursor });
       applyLog(page);
+      pageCount += 1;
     }
   }, [applyLog, cursor]);
+
+  // Fire-and-forget callers (the post-send refresh and the poll tick) must never
+  // let a rejection escape: `void promise` discards the value but attaches no
+  // handler, so a rejected loadRoom surfaces as an unhandled promise rejection
+  // and the poll throws again on every tick. The 5s poll was the reported
+  // `use-group-room.ts:92` unhandled rejection for exactly this reason.
+  const loadRoomSafely = useCallback((roomId: string) => {
+    void loadRoom(roomId).catch((cause) => {
+      if (mountedRef.current && !isRoomNotFound(cause)) setError(toGroupRoomError(cause));
+    });
+  }, [loadRoom]);
 
   const selectRoom = useCallback(async (roomId: string | null) => {
     setSelectedRoomId(roomId);
@@ -199,15 +259,54 @@ export function useGroupRoom(options: GroupRoomOptions = {}): GroupRoomResult {
     try {
       const result = await clientRef.current.send(selectedRoomId, eventId, { text, ...(threadId ? { threadId } : {}) });
       setEvents((current) => mergeGroupEvents(current.filter((item) => item.id !== eventId && item.seq !== optimistic.seq), [result]));
+      // Refresh the driver status immediately so the UI shows the members
+      // as working right after a send, instead of waiting for the next poll.
+      if (mountedRef.current) void loadRoomSafely(selectedRoomId);
       return result;
     } catch (cause) { if (mountedRef.current) { setEvents((current) => current.filter((item) => item.id !== eventId)); setError(toGroupRoomError(cause)); } return null; }
-  }, [events, room, selectedRoomId]);
+  }, [events, loadRoom, room, selectedRoomId]);
 
   const disband = useCallback(async () => {
     if (!selectedRoomId) return;
-    try { await clientRef.current.disband(selectedRoomId, `mc-${Date.now()}`); await loadRoom(selectedRoomId); }
+    try {
+      await clientRef.current.disband(selectedRoomId, `mc-${Date.now()}`);
+      // The room→vault routing map is MC-owned curation state keyed by room
+      // id; a disbanded room can never synthesize again, so its entry would
+      // otherwise leak forever in room_vaults.json.
+      await clearRoomVault(selectedRoomId, options.accessToken).catch(() => undefined);
+      await loadRoom(selectedRoomId);
+    }
     catch (cause) { if (mountedRef.current) setError(toGroupRoomError(cause)); }
+  }, [loadRoom, options.accessToken, selectedRoomId]);
+
+  const approve = useCallback(async (params: { memberId?: string | null; taskId?: string | null; executionGeneration?: number; choice?: string | null; requestId?: string | null }) => {
+    if (!selectedRoomId) throw new Error('No room selected.');
+    const result = await clientRef.current.approve(selectedRoomId, params);
+    if (mountedRef.current) { setError(null); await loadRoom(selectedRoomId); }
+    return result;
   }, [loadRoom, selectedRoomId]);
+
+  const retryMember = useCallback(async (taskId?: string | null) => {
+    if (!selectedRoomId) throw new Error('No room selected.');
+    const result = await clientRef.current.retry(selectedRoomId, taskId);
+    if (mountedRef.current) { setError(null); await loadRoom(selectedRoomId); }
+    return result;
+  }, [loadRoom, selectedRoomId]);
+
+  const stopRoom = useCallback(async () => {
+    if (!selectedRoomId) return null;
+    const result = await clientRef.current.stop(selectedRoomId);
+    if (mountedRef.current) { setError(null); await loadRoom(selectedRoomId); }
+    return result;
+  }, [loadRoom, selectedRoomId]);
+
+  const renameRoom = useCallback(async (name: string) => {
+    if (!selectedRoomId || !name.trim()) return;
+    try {
+      await clientRef.current.rename(selectedRoomId, `mc-${Date.now()}`, name.trim());
+      if (mountedRef.current) { setError(null); await loadRooms(); await loadRoom(selectedRoomId); }
+    } catch (cause) { if (mountedRef.current) setError(toGroupRoomError(cause)); }
+  }, [loadRoom, loadRooms, selectedRoomId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -227,9 +326,9 @@ export function useGroupRoom(options: GroupRoomOptions = {}): GroupRoomResult {
 
   useEffect(() => {
     if (!selectedRoomId || options.enabled === false || options.pollMs === 0) return undefined;
-    const timer = window.setInterval(() => { void loadRoom(selectedRoomId); }, options.pollMs ?? 5000);
+    const timer = window.setInterval(() => { loadRoomSafely(selectedRoomId); }, options.pollMs ?? 5000);
     return () => window.clearInterval(timer);
-  }, [loadRoom, options.enabled, options.pollMs, selectedRoomId]);
+  }, [loadRoomSafely, options.enabled, options.pollMs, selectedRoomId]);
 
   const status = statusParts(driverStatus);
   const memberActivity: Record<string, GroupEvent> = {};
@@ -239,8 +338,11 @@ export function useGroupRoom(options: GroupRoomOptions = {}): GroupRoomResult {
     capabilities, driverAvailable: capabilities?.driver === true, rooms, room, selectedRoomId, events, cursor, loading, refreshing,
     error, serviceUnavailable: error?.retryable === true && /unavailable|connect|closed|timed out/i.test(error.message), authorityChanged,
     driverStatus, pendingActions: status.pendingActions, approval: status.approval, blocked: status.blocked,
+    working: driverStatus.working === true || status.pendingActions.length > 0,
     disbanded: Boolean(room?.disbandedAt), memberActivity, round: deriveRoundCoordinates(events),
     focusHandle: latestMemberEvent?.message.member?.handle ?? null,
     selectRoom, refresh, retry, send, disband, clearAuthorityChange: () => setAuthorityChanged(false),
+    approve, retryMember, renameRoom,
+    stopRoom,
   };
 }

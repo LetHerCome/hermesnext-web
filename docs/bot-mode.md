@@ -53,9 +53,22 @@ Each bot has **one** durable chat identified by `(profile, title = "Bot Chat")`,
 
 ### Group rooms
 
-- Group chats integrated in the drawer with a **final-only view** (`GroupRoomView` + `group-room-view-model`).
+- Group chats integrated in the drawer with a **final-only view** (`GroupRoomView` + `group-room-view-model`), reusing the canonical chat surfaces (`ChatMessageCard`, `ToolRunSummary`, `chat-composer-*` CSS) instead of duplicating markup.
+- The drawer carries a `Chat | Rooms` tab rail (auto-hiding on fast scroll, overlay so the transcript never reflows).
 - Authenticated RPC client (`group-gateway.ts`): built with `requestBotRpc(method, params, storedToken)` — the MC token is required otherwise `groups.*` answers 401.
 - Honest empty state when `groups.list` returns zero rooms.
+- Member actions go through the driver: `groups.stop` / `groups.approve` / `groups.retry` / `groups.rename` / `groups.disband`, with an inline rename in the header and a 2-click confirm on disband.
+- **Tool traces** are read from the member profiles' existing `Group: <room_id>` sessions by `server/room_tool_store.py` (Mission Control-owned, read-only SQLite) and served via `/api/local/room/tools`. The collector detects which reasoning columns exist on each member's `messages` schema, so partially-migrated profiles degrade to tool-only instead of failing.
+- Room creation picks the **nightly-synthesis vault** from the Curate vault list; the routing map lives in MC (`server/room_vault_store.py`, served by `/api/local/room/vault`) and is cleared when a room is disbanded. `room_inventory` in the BDH bridge reads it and falls back to the member profiles when untouched.
+
+### Cross-device room pointer
+
+The "last room I had open" is shared across devices like the last chat:
+
+- `server/last_room_store.py` keeps a **revisioned CAS pointer** served by `GET`/`POST /api/local/room/last`; `localStorage` (`mission-control-last-room`) is only the first-paint mirror.
+- `room-persistence.ts::claimLastRoomPointer` **retries on 409 with the canonical revision**. The store deliberately rejects a claim whose `expectedRevision` does not match, and the UI sends no revision when it switches to a room other than the one it last saw — so without the retry the pointer is frozen at the first room ever selected and every device keeps adopting it.
+- Opening Rooms prefers the server pointer and adopts it when another device changed it.
+- Switching to the Chat tab must **never** clear the pointer: it means "last room open", so reopening Rooms must land back on it.
 
 ## Invariants
 
@@ -75,6 +88,6 @@ Each bot has **one** durable chat identified by `(profile, title = "Bot Chat")`,
 
 ## Tests
 
-Dedicated suite in `tests/`: `bot-chat-routing.test.ts`, `bot-chat-policy.test.ts`, `bot-handoff*.test.ts`, `bot-lineage.test.ts`, `bot-mentions.test.ts`, `bot-create.test.ts`, `bot-gateway.test.ts`, `group-gateway.test.ts`, `group-room*.test.ts`, `chat-ui-contract.test.ts`, plus server-side stores (`server/tests/test_chat_handoff_store.py`, `test_chat_title_store.py`, `test_last_chat_store.py`).
+Dedicated suite in `tests/`: `bot-chat-routing.test.ts`, `bot-chat-policy.test.ts`, `bot-handoff*.test.ts`, `bot-lineage.test.ts`, `bot-mentions.test.ts`, `bot-create.test.ts`, `bot-gateway.test.ts`, `group-gateway.test.ts`, `group-room*.test.ts`, `chat-ui-contract.test.ts`, plus server-side stores (`server/tests/test_chat_handoff_store.py`, `test_chat_title_store.py`, `test_last_chat_store.py`, `test_last_room_store.py`, `test_room_tool_store.py`).
 
 > Implemented in PR #51 (merged 2026-09-12, merge commit `bac8ad7`). Feature history (original bot handoff proposal) lives in the vault: `projects/hermes-mission-control/sections/bot-crossconnection.md` — this doc is the living reference.
