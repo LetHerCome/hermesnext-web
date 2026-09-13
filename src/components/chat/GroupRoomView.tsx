@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {AlertTriangle, Check, ChevronRight, Loader2, Plus, RefreshCw, Send, ShieldAlert, Trash2, Users, X, XCircle, XOctagon, ChevronDown} from 'lucide-react';
 import { useI18n } from '../../lib/i18n';
 import { ChatMessageCard } from '../chat-messages';
@@ -281,7 +281,6 @@ export function CreateRoomForm({ members, onCancel, onCreate, initialVault = '' 
 export const GroupRoomView = memo(function GroupRoomView({ state, onSend, className = '', mentionRoster = [], onNearBottomChange }: GroupRoomViewProps) {
   const { t } = useI18n();
   const [focusedMember, setFocusedMember] = useState<string | null>(null);
-  const [confirmDisband, setConfirmDisband] = useState(false);
   const [nearBottom, setNearBottom] = useState(true);
   const nearBottomRef = useRef(true);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -300,6 +299,12 @@ export const GroupRoomView = memo(function GroupRoomView({ state, onSend, classN
     });
   }, []);
 
+  // Room tool traces are produced by the members' own turns, so they keep
+  // growing while a room works. Refresh on the transcript's latest event
+  // sequence (the same cadence as the room poll) instead of loading once per
+  // room selection — otherwise the strip freezes on the trace set that existed
+  // when the room was opened.
+  const latestSequence = state.events.at(-1)?.seq ?? 0;
   useEffect(() => {
     let cancelled = false;
     if (!state.selectedRoomId) {
@@ -312,7 +317,7 @@ export const GroupRoomView = memo(function GroupRoomView({ state, onSend, classN
       .then((tools) => { if (!cancelled) setRoomTools(tools); })
       .catch(() => { if (!cancelled) setRoomTools([]); });
     return () => { cancelled = true; };
-  }, [state.selectedRoomId]);
+  }, [state.selectedRoomId, latestSequence]);
   const entries = useMemo(() => visibleGroupEvents(state.events, state.room?.members ?? []), [state.events, state.room?.members]);
   const latestByMember = useMemo(() => {
     const result: Record<string, GroupEvent> = {};
@@ -351,12 +356,38 @@ export const GroupRoomView = memo(function GroupRoomView({ state, onSend, classN
     if (!node) return;
     nearBottomRef.current = true;
     setNearBottom(true);
+    onNearBottomChange?.(true);
     node.scrollTo({ top: node.scrollHeight, behavior });
-  }, []);
+  }, [onNearBottomChange]);
 
-  useEffect(() => {
+  // Follow the transcript while the user is already at the bottom.
+  //
+  // This is a LAYOUT effect keyed on the number of RENDERED rows, not on
+  // `state.events.length`: the room log arrives before the roster does, and
+  // `visibleGroupEvents` needs the members to produce any row at all. Keyed on
+  // the event count the scroll ran against an empty ~600px node (a no-op at the
+  // top), the real content committed afterwards with no further trigger, and
+  // entering a room left the user at the top of a 43k-px transcript — with the
+  // FAB hidden too, because the follow had just set nearBottom=true.
+  useLayoutEffect(() => {
     if (nearBottomRef.current) scrollToBottom();
-  }, [scrollToBottom, state.events.length]);
+  }, [scrollToBottom, filtered.length]);
+
+  // Safety net for growth that does not change the row count: the pagination
+  // tail landing, an expanded tool strip, late-loading content. ResizeObserver
+  // cannot see this (a scroll container's box is fixed), so watch the children.
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (!node || typeof MutationObserver === 'undefined') return undefined;
+    let children = node.childElementCount;
+    const observer = new MutationObserver(() => {
+      if (node.childElementCount === children) return;
+      children = node.childElementCount;
+      if (nearBottomRef.current) scrollToBottom();
+    });
+    observer.observe(node, { childList: true });
+    return () => observer.disconnect();
+  }, [scrollToBottom]);
 
   const handleScroll = useCallback(() => {
     const node = transcriptRef.current;

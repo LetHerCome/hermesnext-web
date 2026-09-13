@@ -422,7 +422,11 @@ const CanonicalChatDrawer = memo(function CanonicalChatDrawer({ open, storedToke
     reset,
   } = useGatewayChat(storedToken, open, initialSessionId, botProfile);
   const chatHelpAttention = useTabAttention({ needsAction: Boolean(interaction) || Boolean(error), atBottom: nearBottom, contentCount: messages.length });
-  const roomsBackgroundAttention = useTabAttention({ needsAction: false, atBottom: true, contentCount: 0 });
+  // The chat drawer has no room transcript in scope, so the Rooms tab shows no
+  // background signal here. It must not pretend to: a dot driven by hardcoded
+  // false/true/0 can never light up, and the only honest states available to
+  // this rail are the chat tab's own. Room-side attention comes from the rooms
+  // drawer (roomAttention below), which does read the room state.
 
   const activeTargetStorageKey = sessionId ? `mission-control-active-bot-target:${sessionId}` : null;
   const clearActiveBotTarget = useCallback(() => {
@@ -1605,7 +1609,7 @@ const CanonicalChatDrawer = memo(function CanonicalChatDrawer({ open, storedToke
             </div>
           </div>
         </header>
-        {onOpenRooms ? <AutoHideModeTabs active="chat" onSelect={(mode) => { if (mode === 'rooms') onOpenRooms(); }} containerRef={drawerRef} chatLed={chatHelpAttention} roomsLed={roomsBackgroundAttention} /> : null}
+        {onOpenRooms ? <AutoHideModeTabs active="chat" onSelect={(mode) => { if (mode === 'rooms') onOpenRooms(); }} containerRef={drawerRef} chatLed={chatHelpAttention} /> : null}
 
         {modelPickerOpen ? (
           <ChatModelPicker
@@ -1842,7 +1846,7 @@ const CanonicalChatDrawer = memo(function CanonicalChatDrawer({ open, storedToke
 
 function GroupChatDrawer({ open, roomId, storedToken, onClose, onRoomChange }: ChatDrawerProps) {
   const { t } = useI18n();
-  const state = useGroupRoom({ enabled: open, initialRoomId: roomId ?? null });
+  const state = useGroupRoom({ enabled: open, initialRoomId: roomId ?? null, accessToken: storedToken?.trim() || undefined });
   const canUseRooms = state.capabilities?.driver === true && state.driverAvailable;
   const [creating, setCreating] = useState(false);
   const [roomPickerOpen, setRoomPickerOpen] = useState(false);
