@@ -105,10 +105,13 @@ function ProviderCard({ provider }: { provider: MissionControlProviderUsage }) {
   const { t } = useI18n();
   const label = PROVIDER_LABELS[provider.provider] ?? provider.provider;
   const unavailable = !provider.available;
-  const balances = provider.balances.filter((balance) => typeof balance.value === 'number');
+  // Unavailable providers (e.g. CodexBar not installed) omit windows/balances/metrics
+  // entirely instead of sending empty arrays; the JSX below already renders nothing
+  // but the error message in that case, so default to [] rather than crash here.
+  const balances = (provider.balances ?? []).filter((balance) => typeof balance.value === 'number');
   const primaryBalance = balances.find((balance) => balance.id === 'total_spendable' || balance.id === 'balance') ?? balances[0];
   const secondaryBalances = balances.filter((balance) => balance !== primaryBalance);
-  const metrics = provider.metrics.filter((metric) => metric.value !== null && metric.value !== undefined);
+  const metrics = (provider.metrics ?? []).filter((metric) => metric.value !== null && metric.value !== undefined);
   const resetCreditMetrics = provider.provider === 'codex'
     ? metrics.filter((metric) => metric.id === 'reset_credits_available')
     : [];

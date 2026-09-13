@@ -20,11 +20,18 @@ runtime_ready() {
 
 # Prefer the core venv because it contains the Hermes state modules. Fall back
 # to system python3 only when that interpreter also has the complete runtime.
+# Windows venvs use Scripts/python.exe instead of bin/python, and Windows
+# python.org installs typically expose only `python`, not `python3`.
 CORE_PYTHON="$HERMES_ROOT/hermes-agent/venv/bin/python"
+CORE_PYTHON_WIN="$HERMES_ROOT/hermes-agent/venv/Scripts/python.exe"
 if [[ -x "$CORE_PYTHON" ]] && runtime_ready "$CORE_PYTHON"; then
   PYTHON_BIN="$CORE_PYTHON"
+elif [[ -x "$CORE_PYTHON_WIN" ]] && runtime_ready "$CORE_PYTHON_WIN"; then
+  PYTHON_BIN="$CORE_PYTHON_WIN"
 elif command -v python3 >/dev/null 2>&1 && runtime_ready "$(command -v python3)"; then
   PYTHON_BIN="$(command -v python3)"
+elif command -v python >/dev/null 2>&1 && runtime_ready "$(command -v python)"; then
+  PYTHON_BIN="$(command -v python)"
 else
   echo "[mission-control-local-telemetry] Python 3.10+, psutil, or websockets is missing." >&2
   echo "Install the base sidecar dependencies into the interpreter that will run it:" >&2
