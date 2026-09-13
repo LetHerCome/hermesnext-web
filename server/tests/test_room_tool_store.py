@@ -40,18 +40,30 @@ def _write_db(path: Path, rooms: list[tuple[str, str, list[dict]]], members_msgs
     db.close()
 
 
-def _write_profile_db(path: Path, session_id: str, session_title: str, rows: list[tuple[str, str, str, str, float]]) -> None:
-    """Write a minimal member-profile store with one Group session and messages."""
+def _write_profile_db(
+    path: Path,
+    session_id: str,
+    session_title: str,
+    rows: list[tuple[str, str, str, str, float]],
+    reasoning_columns: tuple[str, ...] = (),
+) -> None:
+    """Write a minimal member-profile store with one Group session and messages.
+
+    ``reasoning_columns`` lets a test build a partially-migrated ``messages``
+    schema (e.g. ``reasoning`` without ``reasoning_content``) to prove the
+    collector detects the available columns instead of assuming all four.
+    """
     db = sqlite3.connect(path)
+    extra = "".join(f", {column} TEXT" for column in reasoning_columns)
     db.executescript(
-        """
+        f"""
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY, title TEXT NOT NULL, last_activity_at REAL NOT NULL
         );
         CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
             role TEXT NOT NULL, tool_name TEXT, content TEXT, tool_calls TEXT,
-            timestamp REAL NOT NULL
+            timestamp REAL NOT NULL{extra}
         );
         """
     )
@@ -62,6 +74,18 @@ def _write_profile_db(path: Path, session_id: str, session_title: str, rows: lis
             "INSERT INTO messages (session_id, role, tool_name, content, tool_calls, timestamp) VALUES (?,?,?,?,?,?)",
             (session_id, role, tool_name, content, tool_calls, ts),
         )
+    db.commit()
+    db.close()
+
+
+def _write_reasoning_row(path: Path, column: str, session_id: str, session_title: str, text: str, ts: float) -> None:
+    """Append one reasoning-bearing row to an existing profile store."""
+    db = sqlite3.connect(path)
+    db.execute(
+        f"INSERT INTO messages (session_id, role, tool_name, content, tool_calls, timestamp, {column}) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (session_id, "assistant", None, "final answer", None, ts, text),
+    )
     db.commit()
     db.close()
 
@@ -137,6 +161,43 @@ class RoomToolStoreTests(unittest.TestCase):
             tools = room_tool_store.read_room_tools("room-1", max_age_seconds=600)
         self.assertEqual(len(tools), 3)
         self.assertTrue((Path(self.root.name) / "room_tools.json").is_file())
+
+    def test_partially_migrated_schema_only_selects_available_reasoning_columns(self) -> None:
+        """A profile carrying only some reasoning columns must still yield traces.
+
+        Selecting the full four-column set on such a schema raises
+        OperationalError and used to drop every trace for that member.
+        """
+        partial = Path(self.root.name) / "profiles" / "partial" / "state.db"
+        partial.parent.mkdir(parents=True)
+        _write_profile_db(
+            partial, "sess-partial", "Group: room-1",
+            [("tool", "read_file", "{\"ok\": true}", None, 10.0)],
+            reasoning_columns=("reasoning",),
+        )
+        _write_reasoning_row(partial, "reasoning", "sess-partial", "Group: room-1", "thinking out loud", 11.0)
+        self.profiles["partial"] = partial
+
+        with patch.object(room_tool_store, "room_store_path", return_value=self.state), \
+             patch.object(room_tool_store, "profile_store_path", side_effect=self._profile_path):
+            traces = room_tool_store._member_tool_rows(
+                {"profile": "partial", "handle": "partial", "display_name": "partial"}, "room-1"
+            )
+
+        self.assertEqual([t.get("toolName") for t in traces if t.get("toolName")], ["read_file"])
+        reasoning = [t for t in traces if t.get("kind") == "reasoning"]
+        self.assertEqual(len(reasoning), 1)
+        self.assertEqual(reasoning[0]["output"], "thinking out loud")
+
+    def test_old_schema_without_reasoning_columns_keeps_tool_only_behavior(self) -> None:
+        with patch.object(room_tool_store, "room_store_path", return_value=self.state), \
+             patch.object(room_tool_store, "profile_store_path", side_effect=self._profile_path):
+            traces = room_tool_store._member_tool_rows(
+                {"profile": "crossnection", "handle": "crossnection", "display_name": "crossnection"}, "room-1"
+            )
+
+        self.assertEqual(len(traces), 2)
+        self.assertTrue(all(t.get("kind") != "reasoning" for t in traces))
 
 
 if __name__ == "__main__":

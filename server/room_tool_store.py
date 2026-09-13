@@ -175,16 +175,21 @@ def _member_tool_rows(member: dict[str, str], room_id: str) -> list[dict[str, An
             return []
         session_id = session[0]
         # Some member profiles may still have an old schema without the
-        # reasoning columns — detect what exists and only query what's there.
-        has_reasoning_columns = any(
-            row[1] in ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items")
-            for row in db.execute("PRAGMA table_info(messages)").fetchall()
-        )
-        reasoning_select = ", reasoning, reasoning_content, reasoning_details, codex_reasoning_items" if has_reasoning_columns else ""
+        # reasoning columns — detect exactly which exist and only query those.
+        # Members can be on partially-migrated schemas (e.g. only
+        # ``reasoning``, without ``reasoning_content``), so selecting a fixed
+        # four-column set would raise OperationalError and silently drop every
+        # trace for that member.
+        available_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
+        reasoning_columns = [
+            column
+            for column in ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items")
+            if column in available_columns
+        ]
+        reasoning_select = f", {', '.join(reasoning_columns)}" if reasoning_columns else ""
         reason_filter = (
-            " OR reasoning IS NOT NULL OR reasoning_content IS NOT NULL "
-            "OR reasoning_details IS NOT NULL OR codex_reasoning_items IS NOT NULL"
-        ) if has_reasoning_columns else ""
+            " OR " + " OR ".join(f"{column} IS NOT NULL" for column in reasoning_columns)
+        ) if reasoning_columns else ""
         rows = db.execute(
             f"SELECT role, tool_name, content, tool_calls, timestamp{reasoning_select} "
             "FROM messages WHERE session_id = ? "
@@ -199,14 +204,16 @@ def _member_tool_rows(member: dict[str, str], room_id: str) -> list[dict[str, An
             role_s = _str(row[0])
             tool_name, content, tool_calls = row[1], row[2], row[3]
             ts = float(row[4] or 0.0)
-            reasoning = row[5] if len(row) > 5 else None
-            reasoning_content = row[6] if len(row) > 6 else None
-            reasoning_details = row[7] if len(row) > 7 else None
-            codex_reasoning_items = row[8] if len(row) > 8 else None
+            # Positional offsets follow `reasoning_columns`, which is schema
+            # dependent — read by name rather than by index.
+            reasoning_values = {
+                column: (row[5 + index] if len(row) > 5 + index else None)
+                for index, column in enumerate(reasoning_columns)
+            }
             # Reasoning blocks (the member's hidden chain-of-thought) belong
             # in the per-turn strip too — they are part of the same run as
             # the tool calls. Stored as plain text or JSON items.
-            reason_text = _reasoning_text(reasoning, reasoning_content, reasoning_details, codex_reasoning_items)
+            reason_text = _reasoning_text(*reasoning_values.values())
             if reason_text:
                 entries.append({
                     "kind": "reasoning",
