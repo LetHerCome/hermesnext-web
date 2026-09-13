@@ -53,7 +53,12 @@ Each bot has **one** durable chat identified by `(profile, title = "Bot Chat")`,
 
 ### Group rooms
 
-- Group chats integrated in the drawer with a **final-only view** (`GroupRoomView` + `group-room-view-model`), reusing the canonical chat surfaces (`ChatMessageCard`, `ToolRunSummary`, `chat-composer-*` CSS) instead of duplicating markup.
+Group chats integrated in the drawer with a **final-only view** (`GroupRoomView` + `group-room-view-model`), reusing the canonical chat surfaces (`ChatMessageCard`, `ToolRunSummary`, `chat-composer-*` CSS) instead of duplicating markup.
+
+Full reference: **[docs/rooms.md](rooms.md)** — room lifecycle, tool-trace collection, transcript follow, cross-device pointer, vanished-room recovery, and the gateway-side state migration.
+
+In brief:
+
 - The drawer carries a `Chat | Rooms` tab rail (auto-hiding on fast scroll, overlay so the transcript never reflows).
 - Authenticated RPC client (`group-gateway.ts`): built with `requestBotRpc(method, params, storedToken)` — the MC token is required otherwise `groups.*` answers 401.
 - Honest empty state when `groups.list` returns zero rooms.

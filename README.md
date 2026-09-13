@@ -43,11 +43,12 @@ Mission Control is a local-first operator dashboard for Hermes. It combines a Re
 ### Chat and agent workspace
 
 - Streaming Chat with presence states, reasoning events, and completion recovery
-- **Bot Mode**: managed bot roster, canonical Bot Chat per bot, attributed handoffs, group rooms
+- **Bot Mode**: managed bot roster, canonical Bot Chat per bot, attributed handoffs
+- **Group Rooms**: several bots on one request, with a shared timeline, per-member tool strips, driver controls (`stop` / `approve` / `retry` / `rename` / `disband`), and a cross-device last-room pointer
 - **Expanded Chat + tldraw Agent Mode**: session-bound whiteboard, authenticated bridge, screenshot-to-chat, agent actions, Mermaid import, board lints, exports, and mobile-safe persistence
 - Responsive layout: side rail on desktop, drawer and bottom sheets on mobile
 
-For Chat/Bot Mode details, see [docs/chat.md](docs/chat.md) and [docs/bot-mode.md](docs/bot-mode.md). For localization, see [docs/i18n.md](docs/i18n.md). For telemetry and provider usage, see [docs/telemetry.md](docs/telemetry.md).
+For Chat details, see [docs/chat.md](docs/chat.md); for Bot Mode, see [docs/bot-mode.md](docs/bot-mode.md); for Group Rooms, see [docs/rooms.md](docs/rooms.md). For localization, see [docs/i18n.md](docs/i18n.md). For telemetry and provider usage, see [docs/telemetry.md](docs/telemetry.md).
 
 ## tldraw Agent Mode
 
@@ -70,6 +71,8 @@ For the Chat internals (WebSocket transport, presence pill, persistence, streami
 | Frontend | `src/` | `5174` | React + Vite + TypeScript + Tailwind |
 
 All data flows through `/api/local/*` endpoints. In development, Vite proxies those requests to the telemetry server.
+
+Group Rooms additionally use the gateway's `groups.*` JSON-RPC surface over `/api/ws` — the gateway owns room state, while Mission Control owns only the last-room pointer, the vault routing map, and the read-only tool-trace collection. See [docs/rooms.md](docs/rooms.md).
 
 See [docs/telemetry.md](docs/telemetry.md) for the full telemetry overview, including the **provider-usage** pipeline (CodexBar/Nous Portal → normalized cache/API → gauges) and its troubleshooting.
 
@@ -102,7 +105,13 @@ Create `./.env` from `.env.example`:
 
 ```bash
 VITE_MISSION_CONTROL_LOCAL_API_BASE_URL=/api/local
+
+# Bearer token. The server side reads MISSION_CONTROL_TOKEN; the browser reads
+# the VITE_-prefixed twin (Vite only exposes VITE_* to client code). Set BOTH
+# to the SAME value — they are independent variables and nothing bridges them.
+MISSION_CONTROL_TOKEN=your_token
 VITE_MISSION_CONTROL_TOKEN=your_token
+
 # Shared Hermes dashboard API endpoint; defaults to 127.0.0.1:9119
 MISSION_CONTROL_DASHBOARD_HOST=127.0.0.1
 MISSION_CONTROL_DASHBOARD_PORT=9119
@@ -112,7 +121,13 @@ MISSION_CONTROL_DASHBOARD_PORT=9119
 MISSION_CONTROL_DEV_HOSTS=
 ```
 
-The bearer token is shared between the telemetry server and the UI. The telemetry server reads it from `.env` via the launcher script.
+The bearer token is shared between the telemetry server and the UI, but it is
+read under **two different names**: `server/local_telemetry_server.py` reads
+`MISSION_CONTROL_TOKEN`, while the frontend reads `VITE_MISSION_CONTROL_TOKEN`
+from `import.meta.env` (Vite only exposes `VITE_`-prefixed variables to browser
+code). There is no bridge between them, so both must be set to the same value —
+setting only one leaves either the sidecar or the browser unauthenticated.
+
 The dashboard API launcher and Vite proxy use the same dashboard host/port
 variables. Empty values use the defaults; ports must be between 1 and 65535.
 
@@ -213,6 +228,16 @@ By default the telemetry server binds to loopback (`127.0.0.1`) and Vite serves 
 
 Both processes accept Tailscale peer IPs once configured. A reverse proxy (`tailscale serve`, Caddy, nginx) is the recommended alternative: it exposes the dashboard without widening the telemetry bind.
 
+## Requirements
+
+- **Node.js >= 22.6** (declared in `package.json` `engines`). The TypeScript
+  test suites run with Node's native type stripping, which does not exist before
+  Node 22.6 — on Node 20 they fail with `node: bad option:
+  --experimental-strip-types`. CI runs the frontend job on Node 22.
+- **Python >= 3.10** for the telemetry sidecar (`hermes_state.py` uses 3.10+
+  syntax) plus `psutil` and `websockets`.
+- **pnpm** (`packageManager: pnpm@10.33.2`).
+
 ## Building
 
 ```bash
@@ -225,16 +250,43 @@ Static output lands in `dist/` and can be served by any static host.
 
 ```bash
 pnpm build
-pnpm test
+pnpm test            # Python suites (repo + server)
 ```
 
-For a live telemetry sidecar, start `pnpm dev:telemetry` in one terminal, export `MISSION_CONTROL_TOKEN`, then run:
+`pnpm test` runs the **Python** suites only. The JavaScript/TypeScript suites are
+separate scripts, and CI runs a subset of them:
+
+| Script | Covers | In CI |
+|--------|--------|-------|
+| `test:vite-config` | Vite dev-server config contract | yes |
+| `test:rooms` | Room persistence, recovery, tool cards, drawer token | yes |
+| `test:mobile-route-layout` | Mobile route layout contract | yes |
+| `test:system-health-ui` | System health UI contract | yes |
+| `test:server` | Server-side stores (needs `websockets`) | yes (Python job) |
+| `test:chat` | Chat bootstrap, protocol, timeline, handoff, lineage | no |
+| `test:ui` | Chat UI contract | no |
+| `test:provider-usage-ui` | Provider usage UI contract | no |
+| `test:smoke` | Live sidecar smoke test — needs a running telemetry server + token | no |
+| `check:paths` | Documented-path check (run directly by CI) | yes (paths job) |
+
+Run any of them explicitly, e.g. `pnpm test:rooms`.
+
+For a live telemetry sidecar, start `pnpm dev:telemetry` in one terminal, export
+`MISSION_CONTROL_TOKEN`, then run:
 
 ```bash
 pnpm test:smoke
 ```
 
-CI runs the frontend build and Python test suite on pushes and pull requests.
+> `test:chat` and `test:ui` currently **fail** on `main` and are not wired into
+> CI. They assert on source text via `readFileSync` + `includes`, so they break
+> whenever the code they describe is refactored (`test:ui` looks for a literal
+> `const handoffRequestIds = new Set(` that the chat drawer no longer contains)
+> and pass when the wiring is subtly wrong. New tests should call the logic
+> under test instead — see the pure modules `src/lib/room-recovery.ts` and
+> `src/lib/room-tool-message.ts`.
+
+CI runs the frontend build and the Python test suites on pushes and pull requests.
 
 ## Security notes
 

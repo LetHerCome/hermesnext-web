@@ -11,7 +11,9 @@ Mission Control is a **standalone satellite application** in its own repository 
 - Open an issue or discussion for large changes.
 - Keep the core isolated: new data sources go into `server/local_telemetry_server.py`, not `hermes_cli/web_server.py`.
 - Match the existing TypeScript/React patterns and Tailwind conventions.
-- Run `pnpm build` and `pnpm test` before submitting.
+- Node.js >= 22.6 (the TS test suites need native type stripping).
+- Run `pnpm build` and `pnpm test` before submitting. Note that `pnpm test` covers the **Python** suites only — also run the JS/TS script for the area you touched (e.g. `pnpm test:rooms`).
+- New tests must **call** the logic under test. Do not assert on source text with `readFileSync` + `includes`: those tests pass when the wiring is subtly wrong, fail on a correct refactor, and cannot run against a bundled artifact.
 
 ## Development
 
